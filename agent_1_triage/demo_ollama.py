@@ -2,11 +2,11 @@ import json
 from datetime import datetime
 from openai import OpenAI
 
-from sentinel_store import SentinelStore
-from sentinel_tools import TOOL_DEFINITIONS, execute_tool
+from patient_store import PatientStore, Patient
+from tools import TOOL_DEFINITIONS, execute_tool
 
 # Import the existing system prompt without touching any agent files
-from sentinel_agent import SYSTEM_PROMPT
+from triage_agent import SYSTEM_PROMPT
 
 # ── Model ──────────────────────────────────────────────────────────────────
 OLLAMA_MODEL = "qwen2.5:7b"
@@ -23,10 +23,11 @@ for tool in TOOL_DEFINITIONS:
         }
     })
 
-def run_sentinel_cycle_ollama(client: OpenAI, store: SentinelStore, cycle: int) -> None:
+
+def run_triage_cycle_ollama(client: OpenAI, store: PatientStore, cycle: int) -> None:
     """A separate cycle loop specifically for the OpenAI module and Ollama API behavior."""
     print(f"\n{'='*60}")
-    print(f"  DETERIORATION SENTINEL CYCLE {cycle} [Ollama: {OLLAMA_MODEL}] |  {datetime.now().strftime('%H:%M:%S')}")
+    print(f"  TRIAGE CYCLE {cycle} [Ollama: {OLLAMA_MODEL}] |  {datetime.now().strftime('%H:%M:%S')}")
     print(f"{'='*60}")
 
     messages = [
@@ -34,10 +35,9 @@ def run_sentinel_cycle_ollama(client: OpenAI, store: SentinelStore, cycle: int) 
         {
             "role": "user",
             "content": (
-                f"Sentinel cycle {cycle} starting now. "
+                f"Triage cycle {cycle} starting now. "
                 f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. "
-                "Please assess all admitted patients for signs of deterioration "
-                "and take any necessary actions."
+                f"Please assess the waiting queue and take any necessary actions."
             )
         }
     ]
@@ -86,6 +86,7 @@ def run_sentinel_cycle_ollama(client: OpenAI, store: SentinelStore, cycle: int) 
                 "content": json.dumps(result)
             })
 
+
 def demo_ollama():
     """Start point of the Ollama-specific demo."""
     # Connect to the local Ollama instance's OpenAI compatible port
@@ -93,62 +94,57 @@ def demo_ollama():
         base_url='http://localhost:11434/v1',
         api_key='ollama', 
     )
-    store = SentinelStore()
+    store = PatientStore()
 
     print("=" * 60)
-    print("  DETERIORATION SENTINEL AGENT — OLLAMA DEMO")
+    print("  TRIAGE ORCHESTRATOR AGENT — OLLAMA DEMO")
     print(f"  Model  : {OLLAMA_MODEL}")
     print(f"  Pattern: ReAct (tool-use loop)")
     print("=" * 60)
 
-    print("\n[Demo] 3 admitted patients in the store:")
-    print("  CGH-001 — Meena Krishnan, 58F, Ward 3")
-    print("            Temp 37.0->37.4->37.8->38.1 | HR 78->85->94->103 | BP 118->112->104->96")
-    print("            -> Classic early sepsis pattern (agent should flag HIGH)")
-    print()
-    print("  CGH-002 — Ravi Shankar, 45M, Ward 3")
-    print("            Declining into infection but scheduled for discharge")
-    print("            -> Agent should flag MEDIUM/HIGH AND message_agent to hold_discharge")
-    print()
-    print("  CGH-003 — Priya Nair, 32F, ICU")
-    print("            SpO2 97.0->96.2->95.1->94.0 — consistent decline over 12 hours")
-    print("            -> Agent should flag MEDIUM (respiratory concern)")
-    print()
+    # ── Cycle 1: baseline queue (token order wrong) ────────────────────────
+    print("\n[Demo] Cycle 1 — queue is in token order, acuity is not respected.\n")
+    run_triage_cycle_ollama(client, store, cycle=1)
 
-    # ── Run the sentinel cycle ─────────────────────────────────────────────
-    run_sentinel_cycle_ollama(client, store, cycle=1)
+    # ── Simulate a new emergency patient arriving ──────────────────────────
+    print("\n[Demo] A new patient just checked in at the front desk...")
+    store.add_patient(Patient(
+        id="P005",
+        name="Kumar R.",
+        age=62,
+        token="A005",
+        chief_complaint="Sudden onset confusion, slurred speech, left-sided facial droop — started 20 min ago",
+        arrived_at=datetime.now().strftime("%H:%M"),
+        phone="+91-97654-00001",
+        vitals={"bp": "185/110", "hr": 88, "spo2": 95, "temp": 98.6},
+    ))
+    print(f"[Demo] Kumar R. added. Queue now has {len(store.get_queue())} patients.\n")
 
-    # ── Audit summary ──────────────────────────────────────────────────────
+    # ── Cycle 2: agent detects stroke patient, re-prioritises ──────────────
+    print("[Demo] Cycle 2 — agent detects high-acuity stroke patient.\n")
+    run_triage_cycle_ollama(client, store, cycle=2)
+
+    # ── Print audit logs ───────────────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("  AUDIT SUMMARY")
+    print("  AUDIT LOG SUMMARY")
     print("=" * 60)
 
-    alerts   = store.get_alert_log()
-    messages = store.get_message_log()
-    actions  = store.get_action_log()
+    print(f"\nReshuffles performed : {len(store.get_action_log())}")
+    print(f"SMS messages sent    : {len(store.get_sms_log())}")
+    print(f"Doctor notifications : {len(store.get_doctor_log())}")
 
-    print(f"\nAlerts fired         : {len(alerts)}")
-    print(f"Agent messages sent  : {len(messages)}")
-    print(f"Actions logged       : {len(actions)}")
+    print("\n── Final queue order ──")
+    for p in store.get_queue():
+        print(f"  {p.position}. {p.name:15} | Age {p.age} | {p.chief_complaint[:55]}")
 
-    print("\n── Alerts ──")
-    if not alerts:
-        print("  None fired.")
-    for a in alerts:
-        patient = store.get_patient(a.patient_id)
-        name    = patient.name if patient else a.patient_id
-        print(f"\n  [{a.severity.upper()}] {name} ({a.patient_id})")
-        print(f"  Alert ID  : {a.alert_id}")
-        print(f"  Triggered : {a.triggered_at}")
-        print(f"  Reasoning : {a.reasoning[:250]}...")
+    print("\n── SMS log ──")
+    for sms in store.get_sms_log():
+        print(f"  -> {sms['phone']}: {sms['message'][:80]}")
 
-    print("\n── Agent messages ──")
-    if not messages:
-        print("  None sent.")
-    for m in messages:
-        print(f"  -> {m.to_agent} | {m.message_type} | {m.content[:80]}")
+    print("\n── Doctor alerts ──")
+    for alert in store.get_doctor_log():
+        print(f"  [{alert['priority'].upper()}] {alert['message'][:100]}")
 
-    print()
 
 if __name__ == "__main__":
     demo_ollama()

@@ -4,14 +4,14 @@ sentinel_agent.py
 Deterioration Sentinel Agent
 =============================
 Model  : gemini-2.0-flash
-Pattern: ReAct  (Reason → Act → Observe → loop)
+Pattern: ReAct  (Reason -> Act -> Observe -> loop)
 
 Runs every 30 minutes. Watches ALL admitted patients simultaneously.
 Detects deterioration by analysing RATE OF CHANGE across vitals —
 not just whether a value crossed a threshold.
 
 The key insight:
-  Meena's temperature went 37.0 → 37.4 → 37.8 → 38.1 over 12 hours.
+  Meena's temperature went 37.0 -> 37.4 -> 37.8 -> 38.1 over 12 hours.
   None of these values individually triggers a standard alarm.
   But the consistent upward trend, combined with rising HR and falling BP,
   is a classic early sepsis signature — 4–6 hours before collapse.
@@ -68,9 +68,9 @@ For each patient:
      • Haemodynamic:    BP systolic falling + HR rising (compensating)
   d) Call check_active_alerts — never create a duplicate alert.
   e) Decide:
-     → If clear deterioration trend: call create_alert with full reasoning.
-     → If no concerning trend: call no_action with brief reason.
-     → If patient is flagged and scheduled for discharge: call message_agent
+     -> If clear deterioration trend: call create_alert with full reasoning.
+     -> If no concerning trend: call no_action with brief reason.
+     -> If patient is flagged and scheduled for discharge: call message_agent
        with to_agent='discharge_negotiator', message_type='hold_discharge'.
 
 STEP 3 — CONCLUDE
@@ -177,7 +177,7 @@ def main():
     print(f"Model    : {MODEL}")
     print(f"Pattern  : ReAct (tool-use loop)")
     print(f"Interval : every {MONITOR_INTERVAL_SECONDS // 60} minutes")
-    print(f"Patients : {len(store.get_admitted_patients())} admitted\n")
+    print(f"Patients : {len(store.get_all_patients())} admitted\n")
 
     cycle = 0
     while True:

@@ -102,13 +102,13 @@ class DischargeStore:
       DIS-001  Ravi Shankar, 45M   — clinically ready, 4 blockers
                (summary not written, insurance not submitted,
                 pharmacy has 2 pending, transport not arranged)
-               → Agent should resolve all 4, set ETA, SMS patient + family
+               -> Agent should resolve all 4, set ETA, SMS patient + family
 
       DIS-002  Priya Nair, 32F    — NOT clinically ready (vitals only stable 2h)
-               → Agent should detect NOT ready, skip, log reason
+               -> Agent should detect NOT ready, skip, log reason
 
       DIS-003  Meena Krishnan, 58F — ready, 1 blocker (transport only)
-               → Agent should resolve transport, confirm discharge time
+               -> Agent should resolve transport, confirm discharge time
     """
 
     def __init__(self):

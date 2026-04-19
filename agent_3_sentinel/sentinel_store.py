@@ -7,7 +7,7 @@ Mirrors the style of PatientStore (agent_1) and CareStore (agent_2).
 Simulates:
   - Admitted patients with vitals history
   - Alert log (what the agent fires)
-  - Inter-agent message bus (Sentinel → other agents)
+  - Inter-agent message bus (Sentinel -> other agents)
   - Audit log
 
 In production: backed by PostgreSQL / hospital EMR.
@@ -79,9 +79,9 @@ class SentinelStore:
     In-memory store for the Deterioration Sentinel Agent.
     Three synthetic patients pre-loaded with distinct patterns:
 
-      CGH-001  Meena K.  — early sepsis signature  (temp↑ HR↑ BP↓)  → HIGH alert expected
-      CGH-002  Ravi S.   — completely stable                          → no action expected
-      CGH-003  Priya N.  — SpO2 slowly declining                     → MEDIUM alert expected
+      CGH-001  Meena K.  — early sepsis signature  (temp↑ HR↑ BP↓)  -> HIGH alert expected
+      CGH-002  Ravi S.   — completely stable                          -> no action expected
+      CGH-003  Priya N.  — SpO2 slowly declining                     -> MEDIUM alert expected
     """
 
     def __init__(self):
@@ -129,14 +129,14 @@ class SentinelStore:
         # ── Vitals history ────────────────────────────────────────────────
         # CGH-001 Meena: classic early sepsis — each value alone is normal,
         # but rate of change across 4 readings is the danger signal.
-        # Temp: 37.0 → 37.4 → 37.8 → 38.1 (+1.1°C over 12h)
-        # HR:   78  → 85  → 94  → 103  (+25 BPM over 12h)
-        # BP:   118 → 112 → 104 → 96   (-22 mmHg systolic over 12h)
+        # Temp: 37.0 -> 37.4 -> 37.8 -> 38.1 (+1.1°C over 12h)
+        # HR:   78  -> 85  -> 94  -> 103  (+25 BPM over 12h)
+        # BP:   118 -> 112 -> 104 -> 96   (-22 mmHg systolic over 12h)
 
         # CGH-002 Ravi: boring stable. Agent should say "no action".
 
         # CGH-003 Priya: SpO2 slowly dropping — respiratory deterioration.
-        # 97.0 → 96.2 → 95.1 → 94.0 (-3% over 12h, accelerating)
+        # 97.0 -> 96.2 -> 95.1 -> 94.0 (-3% over 12h, accelerating)
 
         self._vitals: List[VitalReading] = [
 

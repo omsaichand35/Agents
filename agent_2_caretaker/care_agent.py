@@ -4,7 +4,7 @@ care_agent.py
 Care Continuity Agent
 =====================
 Model  : gemini-2.0-flash  (Gemini 2.0 Flash)
-Pattern: ReAct  (Reason → Act → Observe → loop)
+Pattern: ReAct  (Reason -> Act -> Observe -> loop)
 
 Runs every 30 minutes. Detects gaps in patient care plans.
 Classifies severity. Finds resolutions. Gets minimal human approval.
@@ -17,15 +17,15 @@ The signature scenario:
              No human flagged anything
 
   Agent cycle at 04:00 PM:
-    → Detects the gap (medication_not_dispensed, 6h, critical)
-    → Queries pharmacy → out of stock
-    → Searches drug DB → Co-Amoxiclav 625mg available
-    → Sends doctor a one-tap approval request
-    → Doctor approves
-    → Updates prescription
-    → Notifies pharmacy with new order
-    → Updates nurse's medication sheet with new drug + time
-    → Resolves the gap
+    -> Detects the gap (medication_not_dispensed, 6h, critical)
+    -> Queries pharmacy -> out of stock
+    -> Searches drug DB -> Co-Amoxiclav 625mg available
+    -> Sends doctor a one-tap approval request
+    -> Doctor approves
+    -> Updates prescription
+    -> Notifies pharmacy with new order
+    -> Updates nurse's medication sheet with new drug + time
+    -> Resolves the gap
     All without any human initiating it.
 """
 
@@ -73,23 +73,23 @@ Classify the gap:
 
 STEP 3 — INVESTIGATE ROOT CAUSE
 For 'medication_not_dispensed' gaps:
-  → Call query_pharmacy to check stock.
-  → If out of stock, call drug_substitution_search to find a therapeutically equivalent alternative.
+  -> Call query_pharmacy to check stock.
+  -> If out of stock, call drug_substitution_search to find a therapeutically equivalent alternative.
 
 For 'administration_overdue' gaps:
-  → Check if drug was dispensed.
-  → If yes: notify the nurse urgently.
-  → If no: treat as a dispensing gap first.
+  -> Check if drug was dispensed.
+  -> If yes: notify the nurse urgently.
+  -> If no: treat as a dispensing gap first.
 
 STEP 4 — RESOLVE
 For drug substitutions:
-  → Call escalate_to_human with a clear description and suggested_action for the doctor.
-  → Once approved (approval status will be 'approved' in the response), call write_action with action='update_prescription'.
-  → Call write_action with action='update_nurse_sheet' to reschedule administration.
-  → Call send_notification to inform pharmacy, nurse, and doctor of changes.
+  -> Call escalate_to_human with a clear description and suggested_action for the doctor.
+  -> Once approved (approval status will be 'approved' in the response), call write_action with action='update_prescription'.
+  -> Call write_action with action='update_nurse_sheet' to reschedule administration.
+  -> Call send_notification to inform pharmacy, nurse, and doctor of changes.
 
 For administration delays:
-  → Call send_notification to nurse with urgent reminder.
+  -> Call send_notification to nurse with urgent reminder.
 
 STEP 5 — CLOSE
 After all actions, summarise what gaps were found, what was done, and what approvals were obtained.

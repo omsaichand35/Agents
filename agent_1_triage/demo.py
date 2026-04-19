@@ -19,6 +19,12 @@ from datetime import datetime
 
 def demo():
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        print("Error: GEMINI_API_KEY or GOOGLE_API_KEY environment variable is not set.")
+        print("Please set your API key before running this script.")
+        print("Example (Windows): $env:GEMINI_API_KEY='your_api_key'")
+        return
+
     client = genai.Client(api_key=api_key) if api_key else genai.Client()
     
     store = PatientStore()
@@ -66,7 +72,7 @@ def demo():
 
     print("\n── SMS log ──")
     for sms in store.get_sms_log():
-        print(f"  → {sms['phone']}: {sms['message'][:80]}")
+        print(f"  -> {sms['phone']}: {sms['message'][:80]}")
 
     print("\n── Doctor alerts ──")
     for alert in store.get_doctor_log():

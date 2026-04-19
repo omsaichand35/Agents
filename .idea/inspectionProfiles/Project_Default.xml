@@ -1,0 +1,72 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="numpy" />
+          <option value="scikit-learn" />
+          <option value="opencv-python" />
+          <option value="matplotlib" />
+          <option value="torch" />
+          <option value="pandas" />
+          <option value="segment_anything" />
+          <option value="torchvision" />
+          <option value="pip" />
+          <option value="filelock" />
+          <option value="PyYAML" />
+          <option value="colorama" />
+          <option value="Pygments" />
+          <option value="psutil" />
+          <option value="setuptools" />
+          <option value="scipy" />
+          <option value="ipykernel" />
+          <option value="Jinja2" />
+          <option value="ipython" />
+          <option value="pillow" />
+          <option value="comm" />
+          <option value="pyzmq" />
+          <option value="wcwidth" />
+          <option value="parso" />
+          <option value="jedi" />
+          <option value="python-dateutil" />
+          <option value="threadpoolctl" />
+          <option value="mpmath" />
+          <option value="sympy" />
+          <option value="packaging" />
+          <option value="platformdirs" />
+          <option value="fsspec" />
+          <option value="MarkupSafe" />
+          <option value="joblib" />
+          <option value="debugpy" />
+          <option value="traitlets" />
+          <option value="decorator" />
+          <option value="stack-data" />
+          <option value="jupyter_client" />
+          <option value="prompt_toolkit" />
+          <option value="cycler" />
+          <option value="networkx" />
+          <option value="six" />
+          <option value="asttokens" />
+          <option value="contourpy" />
+          <option value="executing" />
+          <option value="fonttools" />
+          <option value="matplotlib-inline" />
+          <option value="jupyter_core" />
+          <option value="tornado" />
+          <option value="pure_eval" />
+          <option value="pyparsing" />
+          <option value="kiwisolver" />
+          <option value="cv" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyUnresolvedReferencesInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredIdentifiers">
+        <list>
+          <option value="fast_apis.fastapi_project.database.*" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
