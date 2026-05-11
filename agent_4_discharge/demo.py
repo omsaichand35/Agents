@@ -7,18 +7,18 @@ Useful for testing and the Agent Builder Challenge demo.
 What you will see:
 
   DIS-001  Ravi Shankar, 45M — clinically ready, 4 blockers
-           → Agent drafts discharge summary
-           → Submits insurance pre-auth → approved
-           → Messages pharmacy to expedite 2 medications
-           → SMS family about transport
-           → Sets ETA, SMS patient "You can expect to leave by X:XX PM"
-           → Messages sentinel to stop monitoring, triage to prep bed
+           -> Agent drafts discharge summary
+           -> Submits insurance pre-auth -> approved
+           -> Messages pharmacy to expedite 2 medications
+           -> SMS family about transport
+           -> Sets ETA, SMS patient "You can expect to leave by X:XX PM"
+           -> Messages sentinel to stop monitoring, triage to prep bed
 
   DIS-002  Priya Nair, 32F — NOT clinically ready (vitals stable only 2h)
-           → Agent calls no_action, explains, skips
+           -> Agent calls no_action, explains, skips
 
   DIS-003  Meena Krishnan, 58F — ready, 1 blocker (transport)
-           → Agent contacts family, resolves transport, confirms discharge
+           -> Agent contacts family, resolves transport, confirms discharge
 
 Usage:
     python demo.py
@@ -56,16 +56,16 @@ def demo():
     print("  DIS-001 — Ravi Shankar, 45M, Ward 3")
     print("            Clinically ready. Vitals stable 48h.")
     print("            4 blockers: summary | insurance | pharmacy | transport")
-    print("            → Agent should resolve all 4, set ETA, SMS patient + family")
+    print("            -> Agent should resolve all 4, set ETA, SMS patient + family")
     print()
     print("  DIS-002 — Priya Nair, 32F, ICU")
     print("            NOT clinically ready. Vitals stable only 2h. Still on O2.")
-    print("            → Agent should call no_action and skip")
+    print("            -> Agent should call no_action and skip")
     print()
     print("  DIS-003 — Meena Krishnan, 58F, Ward 2")
     print("            Clinically ready. Insurance approved. Medications dispensed.")
     print("            1 blocker: transport only")
-    print("            → Agent should contact family, resolve transport, confirm discharge")
+    print("            -> Agent should contact family, resolve transport, confirm discharge")
     print()
 
     # ── Run one full cycle ─────────────────────────────────────────────────
@@ -101,11 +101,11 @@ def demo():
 
     print("\n── SMS log ──")
     for s in sms_log:
-        print(f"  → {s['recipient']} ({s['phone']}): {s['message'][:80]}")
+        print(f"  -> {s['recipient']} ({s['phone']}): {s['message'][:80]}")
 
     print("\n── Agent messages ──")
     for m in messages:
-        print(f"  → {m.to_agent} | {m.message_type} | {m.content[:70]}")
+        print(f"  -> {m.to_agent} | {m.message_type} | {m.content[:70]}")
 
     print("\n── Final patient status ──")
     for p in store.get_all_patients():

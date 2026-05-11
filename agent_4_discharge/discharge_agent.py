@@ -4,7 +4,7 @@ discharge_agent.py
 Discharge Negotiator Agent
 ===========================
 Model  : gemini-2.5-flash
-Pattern: ReAct  (Reason → Act → Observe → loop)
+Pattern: ReAct  (Reason -> Act -> Observe -> loop)
 
 Runs every 30 minutes. Actively works to get every medically-ready patient
 home. Identifies every blocker and resolves it without being asked.
@@ -18,14 +18,14 @@ The signature scenario:
     - Arranged transport or contacted family
 
   Discharge Negotiator cycle:
-    → Detects Ravi is clinically ready
-    → Scans all 4 blockers
-    → Drafts discharge summary → sends to doctor for e-signature
-    → Submits insurance pre-auth with correct ICD-10 codes → approved
-    → Messages pharmacy_agent to expedite 2 pending medications
-    → SMS family asking about transport needs
-    → Sets ETA: "You can expect to leave by 3:30 PM"
-    → Loops every 30 min to track resolution and update ETA
+    -> Detects Ravi is clinically ready
+    -> Scans all 4 blockers
+    -> Drafts discharge summary -> sends to doctor for e-signature
+    -> Submits insurance pre-auth with correct ICD-10 codes -> approved
+    -> Messages pharmacy_agent to expedite 2 pending medications
+    -> SMS family asking about transport needs
+    -> Sets ETA: "You can expect to leave by 3:30 PM"
+    -> Loops every 30 min to track resolution and update ETA
     All without any human initiating it.
 """
 
@@ -39,7 +39,7 @@ from discharge_store import DischargeStore
 from discharge_tools import TOOL_DEFINITIONS, execute_tool
 
 # ── Model ─────────────────────────────────────────────────────────────────
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-2.0-flash"
 MONITOR_INTERVAL_SECONDS = 1800   # 30 minutes
 
 # ── Convert tool definitions to Gemini format ──────────────────────────────
@@ -61,34 +61,34 @@ YOUR CYCLE PROTOCOL:
 STEP 1 — BUILD YOUR WORKLIST
 Call get_discharge_candidates to see all admitted patients and their readiness.
 Separate them into:
-  A) Ready + has blockers  → work on these now
-  B) Ready + no blockers   → confirm discharge, SMS patient
-  C) Not clinically ready  → call no_action, explain why, skip
+  A) Ready + has blockers  -> work on these now
+  B) Ready + no blockers   -> confirm discharge, SMS patient
+  C) Not clinically ready  -> call no_action, explain why, skip
 
 STEP 2 — FOR EACH READY PATIENT: MAP ALL BLOCKERS
 Call read_patient_record to get full context.
 Call check_blocker_status to see every open blocker and its type.
-Prioritise: summary → insurance → pharmacy → transport
+Prioritise: summary -> insurance -> pharmacy -> transport
 
 STEP 3 — RESOLVE EACH BLOCKER ACTIVELY
 Do not just list blockers. Act on each one:
 
   summary blocker:
-    → Call draft_discharge_summary with clinical notes from the patient record.
-    → Call resolve_blocker with the summary_id as resolution.
+    -> Call draft_discharge_summary with clinical notes from the patient record.
+    -> Call resolve_blocker with the summary_id as resolution.
 
   insurance blocker:
-    → Call submit_insurance_preauth with a clinical reason.
-    → Call resolve_blocker with the auth_number as resolution.
+    -> Call submit_insurance_preauth with a clinical reason.
+    -> Call resolve_blocker with the auth_number as resolution.
 
   pharmacy blocker:
-    → Call message_agent(to_agent='pharmacy_agent', message_type='expedite_medications')
+    -> Call message_agent(to_agent='pharmacy_agent', message_type='expedite_medications')
       with the specific drug names and urgency.
-    → Call resolve_blocker noting pharmacy has been messaged (update when confirmed).
+    -> Call resolve_blocker noting pharmacy has been messaged (update when confirmed).
 
   transport blocker:
-    → Call send_sms(recipient='family') asking about transport needs and ETA.
-    → Call resolve_blocker noting family has been contacted.
+    -> Call send_sms(recipient='family') asking about transport needs and ETA.
+    -> Call resolve_blocker noting family has been contacted.
 
 STEP 4 — SET / UPDATE ETA
 After resolving blockers, call update_discharge_eta with a realistic time estimate.
@@ -96,9 +96,9 @@ Then call send_sms(recipient='patient') with "You can expect to leave by X:XX PM
 
 STEP 5 — COORDINATE WITH OTHER AGENTS
 After discharge blockers are resolved:
-  → message_agent(to_agent='deterioration_sentinel', message_type='patient_discharged')
+  -> message_agent(to_agent='deterioration_sentinel', message_type='patient_discharged')
     so they stop monitoring the patient.
-  → message_agent(to_agent='triage_orchestrator', message_type='bed_available')
+  -> message_agent(to_agent='triage_orchestrator', message_type='bed_available')
     so the bed can be prepared for the next patient.
 
 STEP 6 — CONCLUDE

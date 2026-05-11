@@ -118,7 +118,7 @@ def demo_ollama():
     print(f"Agent messages     : {len(messages)}")
 
     for s in sms_log:
-        print(f"  → {s['recipient']} ({s['phone']}): {s['message'][:80]}")
+        print(f"  -> {s['recipient']} ({s['phone']}): {s['message'][:80]}")
 
 
 if __name__ == "__main__":

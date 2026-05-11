@@ -6,9 +6,9 @@ Useful for testing and the Agent Builder Challenge demo.
 
 What you will see:
   Cycle 1:
-    • Meena Krishnan (CGH-001) — early sepsis pattern detected → HIGH alert fired
-    • Ravi Shankar   (CGH-002) — stable vitals → no action
-    • Priya Nair     (CGH-003) — SpO2 declining → MEDIUM alert fired
+    • Meena Krishnan (CGH-001) — early sepsis pattern detected -> HIGH alert fired
+    • Ravi Shankar   (CGH-002) — stable vitals -> no action
+    • Priya Nair     (CGH-003) — SpO2 declining -> MEDIUM alert fired
 
 Usage:
     python demo.py
@@ -44,16 +44,16 @@ def demo():
 
     print("\n[Demo] 3 admitted patients in the store:")
     print("  CGH-001 — Meena Krishnan, 58F, Ward 3")
-    print("            Temp 37.0→37.4→37.8→38.1 | HR 78→85→94→103 | BP 118→112→104→96")
-    print("            → Classic early sepsis pattern (agent should flag HIGH)")
+    print("            Temp 37.0->37.4->37.8->38.1 | HR 78->85->94->103 | BP 118->112->104->96")
+    print("            -> Classic early sepsis pattern (agent should flag HIGH)")
     print()
     print("  CGH-002 — Ravi Shankar, 45M, Ward 3")
     print("            All vitals stable, minor normal variation")
-    print("            → Agent should mark as stable (no action)")
+    print("            -> Agent should mark as stable (no action)")
     print()
     print("  CGH-003 — Priya Nair, 32F, ICU")
-    print("            SpO2 97.0→96.2→95.1→94.0 — consistent decline over 12 hours")
-    print("            → Agent should flag MEDIUM (respiratory concern)")
+    print("            SpO2 97.0->96.2->95.1->94.0 — consistent decline over 12 hours")
+    print("            -> Agent should flag MEDIUM (respiratory concern)")
     print()
 
     # ── Run the sentinel cycle ─────────────────────────────────────────────
@@ -87,7 +87,7 @@ def demo():
     if not messages:
         print("  None sent.")
     for m in messages:
-        print(f"  → {m.to_agent} | {m.message_type} | {m.content[:80]}")
+        print(f"  -> {m.to_agent} | {m.message_type} | {m.content[:80]}")
 
     print()
 

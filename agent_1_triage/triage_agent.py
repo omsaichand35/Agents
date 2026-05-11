@@ -2,7 +2,7 @@
 Triage Orchestrator Agent
 =========================
 Model  : claude-sonnet-4-20250514  (Claude Sonnet 4 via Anthropic API)
-Pattern: ReAct  (Reason → Act → Observe → loop)
+Pattern: ReAct  (Reason -> Act -> Observe -> loop)
 
 The agent runs a continuous monitoring loop every 5 minutes.
 Each cycle it:
@@ -23,7 +23,7 @@ from patient_store import PatientStore
 from tools import TOOL_DEFINITIONS, execute_tool
 
 # ── Model ──────────────────────────────────────────────────────────────────
-MODEL = "gemini-2.5-flash"          # Gemini 2.5 Flash
+MODEL = "gemini-2.0-flash"          # Gemini 2.0 Flash
 MONITOR_INTERVAL_SECONDS = 300              # 5 minutes
 
 # Transform Anthropic tools to Gemini tools

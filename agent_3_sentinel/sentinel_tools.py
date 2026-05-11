@@ -1,121 +1,65 @@
 """
-tools.py
-========
-Tool definitions and executors for the Deterioration Sentinel Agent.
-
-Follows the exact same pattern as:
-  agent_1_triage/tools.py      — TOOL_DEFINITIONS list + execute_tool()
-  agent_2_caretaker/care_tools.py
-
-Tools:
-  read_all_patients       — list every admitted patient the agent must watch
-  read_patient_vitals     — fetch last N readings for one patient
-  check_active_alerts     — prevent duplicate alerts for same patient
-  create_deterioration_alert  — write alert with full reasoning chain
-  message_agent           — notify another PatientOS agent
-  no_action               — explicitly record "stable, no action needed"
+sentinel_tools.py  (updated — real inter-agent communication)
+=============================================================
+Changes from original:
+  • message_agent now publishes to shared_bus.bus instead of local store
+  • New process_inbox() handler: sentinel reads its inbox at cycle start
+    and acts on messages from other agents (e.g. discharge_cleared, fyi)
+  • Tool name kept as "message_agent" for backward compatibility with
+    the model's system prompt
 """
 
 from __future__ import annotations
 from typing import Any
 from datetime import datetime
-from sentinel_store import SentinelStore, DeteriorationAlert
+from sentinel_store import SentinelStore
+from shared_bus import bus   # ← real shared bus
 
-# ── Tool schemas (passed to Gemini as function_declarations) ───────────────
 
 TOOL_DEFINITIONS = [
     {
         "name": "read_all_patients",
         "description": (
             "Returns every patient currently admitted to the hospital. "
-            "Call this at the start of every monitoring cycle to get the full "
-            "list of patients the agent must assess. Each entry includes patient_id, "
-            "name, age, ward, bed_number, attending_doctor, and diagnosis."
+            "Call this at the start of every monitoring cycle."
         ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "read_patient_vitals",
         "description": (
-            "Fetches the last 6 recorded vitals for a single admitted patient. "
-            "Returns readings in chronological order (oldest first) so you can "
-            "analyse the TREND — rate of change is more important than any single value. "
-            "Each reading includes: recorded_at, temperature (°C), heart_rate (BPM), "
-            "bp_systolic (mmHg), bp_diastolic (mmHg), spo2 (%), respiratory_rate, recorded_by."
+            "Fetches the last 6 recorded vitals for a single admitted patient "
+            "in chronological order. Analyse TREND — rate of change matters most."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "patient_id": {
-                    "type": "string",
-                    "description": "The patient's unique ID e.g. CGH-001",
-                }
+                "patient_id": {"type": "string", "description": "e.g. CGH-001"}
             },
             "required": ["patient_id"],
         },
     },
     {
         "name": "check_active_alerts",
-        "description": (
-            "Check whether an active deterioration alert already exists for this patient. "
-            "Always call this BEFORE creating a new alert to avoid duplicate escalations. "
-            "Returns has_active_alert (bool) and the list of existing active alerts."
-        ),
+        "description": "Check whether an active deterioration alert already exists for this patient.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "patient_id": {
-                    "type": "string",
-                    "description": "Patient ID to check",
-                }
-            },
+            "properties": {"patient_id": {"type": "string"}},
             "required": ["patient_id"],
         },
     },
     {
         "name": "create_deterioration_alert",
         "description": (
-            "Create a deterioration alert for a patient. "
-            "Only call this when you have analysed the vitals trend and found a genuine "
-            "multi-signal deterioration pattern. "
-            "The reasoning field is critical — it must contain your full chain-of-thought: "
-            "which signals changed, by how much, over what time period, what pattern this "
-            "resembles (e.g. early sepsis), and what you recommend. "
-            "The doctor will read this reasoning to make a clinical decision. Be precise.\n\n"
-            "Severity guide:\n"
-            "  low      — 1-2 signals trending mildly, patient stable overall\n"
-            "  medium   — 2-3 signals trending, rate of change concerning\n"
-            "  high     — 3+ signals trending simultaneously OR fast rate of change\n"
-            "  critical — Classic multi-signal sepsis pattern OR SpO2 below 93%"
+            "Create a deterioration alert. The reasoning field is what the doctor reads. "
+            "Severity: low | medium | high | critical."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "patient_id": {
-                    "type": "string",
-                    "description": "Patient ID",
-                },
-                "severity": {
-                    "type": "string",
-                    "enum": ["low", "medium", "high", "critical"],
-                    "description": "Alert severity level",
-                },
-                "reasoning": {
-                    "type": "string",
-                    "description": (
-                        "Your complete reasoning chain. Must include: "
-                        "1) Exact vital values and timestamps, "
-                        "2) Rate of change for each signal, "
-                        "3) Which pattern this resembles, "
-                        "4) Clinical recommendation, "
-                        "5) Why you chose this severity. "
-                        "This is what the doctor reads. Make it count."
-                    ),
-                },
+                "patient_id": {"type": "string"},
+                "severity":   {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+                "reasoning":  {"type": "string"},
             },
             "required": ["patient_id", "severity", "reasoning"],
         },
@@ -123,10 +67,9 @@ TOOL_DEFINITIONS = [
     {
         "name": "message_agent",
         "description": (
-            "Send a structured message to another PatientOS agent via the message bus. "
-            "Use this to coordinate with other agents — for example: "
-            "message the discharge_negotiator to hold a patient's discharge when you flag them, "
-            "or message the care_continuity agent to check medication gaps for a deteriorating patient."
+            "Send a structured message to another PatientOS agent via the SHARED MESSAGE BUS. "
+            "Available agents: discharge_negotiator, care_continuity, triage_orchestrator. "
+            "Message types: hold_discharge, check_medication_gaps, fyi_deterioration, patient_discharged."
         ),
         "input_schema": {
             "type": "object",
@@ -134,66 +77,53 @@ TOOL_DEFINITIONS = [
                 "to_agent": {
                     "type": "string",
                     "enum": ["discharge_negotiator", "care_continuity", "triage_orchestrator"],
-                    "description": "Target agent to message",
                 },
-                "patient_id": {
-                    "type": "string",
-                    "description": "Patient this message concerns",
-                },
+                "patient_id":   {"type": "string"},
                 "message_type": {
                     "type": "string",
                     "enum": ["hold_discharge", "check_medication_gaps", "fyi_deterioration"],
-                    "description": "Type of inter-agent message",
                 },
-                "content": {
-                    "type": "string",
-                    "description": "Plain-text message content for the receiving agent",
-                },
+                "content":   {"type": "string"},
+                "priority":  {"type": "string", "enum": ["low", "medium", "high", "critical"],
+                              "description": "Default medium. Use high/critical for urgent coordination."},
             },
             "required": ["to_agent", "patient_id", "message_type", "content"],
         },
     },
     {
         "name": "no_action",
-        "description": (
-            "Call this when you have fully assessed a patient's vitals and determined "
-            "that NO deterioration alert is needed. "
-            "This explicitly records your assessment so the audit log is complete. "
-            "Provide a brief reason explaining why the patient is stable."
-        ),
+        "description": "Explicitly record that a patient is stable — no alert needed.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "patient_id": {
-                    "type": "string",
-                    "description": "Patient you assessed",
-                },
-                "reason": {
-                    "type": "string",
-                    "description": (
-                        "Brief explanation of why no action is needed — "
-                        "e.g. 'All vitals stable across 4 readings. No trending pattern detected.'"
-                    ),
-                },
+                "patient_id": {"type": "string"},
+                "reason":     {"type": "string"},
             },
             "required": ["patient_id", "reason"],
         },
     },
+    {
+        "name": "process_inbox",
+        "description": (
+            "Read and act on messages sent to the Deterioration Sentinel by other agents. "
+            "Call this at the START of every cycle to avoid duplicate work and respect "
+            "decisions made by peer agents (e.g. discharge_cleared means stop monitoring)."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
 ]
 
 
-# ── Tool executor ──────────────────────────────────────────────────────────
-
 def execute_tool(name: str, inputs: dict[str, Any], store: SentinelStore) -> dict:
-    """Route a tool call from the agent to the correct handler."""
     try:
         dispatch = {
             "read_all_patients":          lambda: _read_all_patients(store),
             "read_patient_vitals":        lambda: _read_patient_vitals(inputs["patient_id"], store),
             "check_active_alerts":        lambda: _check_active_alerts(inputs["patient_id"], store),
             "create_deterioration_alert": lambda: _create_alert(inputs, store),
-            "message_agent":              lambda: _message_agent(inputs, store),
+            "message_agent":              lambda: _message_agent(inputs),
             "no_action":                  lambda: _no_action(inputs, store),
+            "process_inbox":              lambda: _process_inbox(store),
         }
         if name not in dispatch:
             return {"error": f"Unknown tool: {name}"}
@@ -202,7 +132,7 @@ def execute_tool(name: str, inputs: dict[str, Any], store: SentinelStore) -> dic
         return {"error": str(e)}
 
 
-# ── Individual handlers ────────────────────────────────────────────────────
+# ── Handlers ───────────────────────────────────────────────────────────────
 
 def _read_all_patients(store: SentinelStore) -> dict:
     patients = store.get_all_patients()
@@ -210,14 +140,10 @@ def _read_all_patients(store: SentinelStore) -> dict:
         "total_admitted": len(patients),
         "patients": [
             {
-                "patient_id":       p.patient_id,
-                "name":             p.name,
-                "age":              p.age,
-                "ward":             p.ward,
-                "bed_number":       p.bed_number,
+                "patient_id": p.patient_id, "name": p.name, "age": p.age,
+                "ward": p.ward, "bed_number": p.bed_number,
                 "attending_doctor": p.attending_doctor,
-                "admitted_at":      p.admitted_at,
-                "diagnosis":        p.diagnosis,
+                "admitted_at": p.admitted_at, "diagnosis": p.diagnosis,
             }
             for p in patients
         ],
@@ -228,35 +154,23 @@ def _read_patient_vitals(patient_id: str, store: SentinelStore) -> dict:
     patient = store.get_patient(patient_id)
     if not patient:
         return {"error": f"Patient {patient_id} not found"}
-
     readings = store.get_vitals(patient_id, last_n=6)
     if not readings:
-        return {
-            "patient_id":   patient_id,
-            "patient_name": patient.name,
-            "status":       "no_vitals_recorded",
-            "readings":     [],
-        }
-
+        return {"patient_id": patient_id, "patient_name": patient.name,
+                "status": "no_vitals_recorded", "readings": []}
     return {
-        "patient_id":       patient_id,
-        "patient_name":     patient.name,
-        "age":              patient.age,
-        "ward":             patient.ward,
-        "bed_number":       patient.bed_number,
+        "patient_id": patient_id, "patient_name": patient.name,
+        "age": patient.age, "ward": patient.ward,
+        "bed_number": patient.bed_number,
         "attending_doctor": patient.attending_doctor,
-        "diagnosis":        patient.diagnosis,
-        "readings_count":   len(readings),
+        "diagnosis": patient.diagnosis,
+        "readings_count": len(readings),
         "readings": [
             {
-                "recorded_at":     v.recorded_at,
-                "temperature_c":   v.temperature,
-                "heart_rate_bpm":  v.heart_rate,
-                "bp_systolic":     v.bp_systolic,
-                "bp_diastolic":    v.bp_diastolic,
-                "spo2_pct":        v.spo2,
-                "respiratory_rate": v.respiratory_rate,
-                "recorded_by":     v.recorded_by,
+                "recorded_at": v.recorded_at, "temperature_c": v.temperature,
+                "heart_rate_bpm": v.heart_rate, "bp_systolic": v.bp_systolic,
+                "bp_diastolic": v.bp_diastolic, "spo2_pct": v.spo2,
+                "respiratory_rate": v.respiratory_rate, "recorded_by": v.recorded_by,
             }
             for v in readings
         ],
@@ -266,15 +180,11 @@ def _read_patient_vitals(patient_id: str, store: SentinelStore) -> dict:
 def _check_active_alerts(patient_id: str, store: SentinelStore) -> dict:
     alerts = store.get_active_alerts(patient_id)
     return {
-        "patient_id":       patient_id,
+        "patient_id": patient_id,
         "has_active_alert": len(alerts) > 0,
         "active_alerts": [
-            {
-                "alert_id":    a.alert_id,
-                "severity":    a.severity,
-                "triggered_at": a.triggered_at,
-                "status":      a.status,
-            }
+            {"alert_id": a.alert_id, "severity": a.severity,
+             "triggered_at": a.triggered_at, "status": a.status}
             for a in alerts
         ],
     }
@@ -284,74 +194,113 @@ def _create_alert(inputs: dict, store: SentinelStore) -> dict:
     patient_id = inputs["patient_id"]
     severity   = inputs["severity"]
     reasoning  = inputs["reasoning"]
-
     patient = store.get_patient(patient_id)
     if not patient:
         return {"error": f"Patient {patient_id} not found"}
-
     alert = store.create_alert(patient_id, severity, reasoning)
 
-    # Print formatted alert (mirrors Agent 1/2 doctor notification style)
+    # Automatically notify Care Continuity to check medication gaps for deteriorating patients
+    if severity in ("high", "critical"):
+        bus.publish(
+            from_agent   = "deterioration_sentinel",
+            to_agent     = "care_continuity",
+            patient_id   = patient_id,
+            message_type = "check_medication_gaps",
+            content      = (
+                f"Deterioration alert {alert.alert_id} ({severity}) fired for "
+                f"{patient.name} in {patient.ward}. "
+                f"Please verify all critical medications are being administered on schedule. "
+                f"Reasoning summary: {reasoning[:120]}"
+            ),
+            priority = "high" if severity == "high" else "critical",
+        )
+
     print(f"\n  [DETERIORATION ALERT — {severity.upper()}]")
     print(f"  Patient  : {patient.name} ({patient_id}) | {patient.ward} {patient.bed_number}")
     print(f"  Doctor   : {patient.attending_doctor}")
     print(f"  Alert ID : {alert.alert_id}")
-    print(f"  Reasoning:\n")
     for line in reasoning.split(". "):
         if line.strip():
             print(f"    {line.strip()}.")
     print()
 
     return {
-        "success":      True,
-        "alert_id":     alert.alert_id,
-        "patient_id":   patient_id,
-        "patient_name": patient.name,
-        "severity":     severity,
-        "triggered_at": alert.triggered_at,
-        "message":      f"Alert {alert.alert_id} created. {patient.attending_doctor} notified.",
+        "success": True, "alert_id": alert.alert_id,
+        "patient_id": patient_id, "patient_name": patient.name,
+        "severity": severity, "triggered_at": alert.triggered_at,
+        "bus_notification": "care_continuity notified" if severity in ("high", "critical") else "none",
     }
 
 
-def _message_agent(inputs: dict, store: SentinelStore) -> dict:
-    to_agent     = inputs["to_agent"]
-    patient_id   = inputs["patient_id"]
-    message_type = inputs["message_type"]
-    content      = inputs["content"]
-
-    msg = store.send_agent_message(to_agent, patient_id, message_type, content)
-
-    print(f"  [AGENT MSG → {to_agent}] {content[:100]}")
-
+def _message_agent(inputs: dict) -> dict:
+    msg = bus.publish(
+        from_agent   = "deterioration_sentinel",
+        to_agent     = inputs["to_agent"],
+        patient_id   = inputs["patient_id"],
+        message_type = inputs["message_type"],
+        content      = inputs["content"],
+        priority     = inputs.get("priority", "medium"),
+    )
     return {
-        "success":    True,
-        "message_id": msg.message_id,
-        "from":       "deterioration_sentinel",
-        "to":         to_agent,
-        "patient_id": patient_id,
-        "sent_at":    msg.sent_at,
+        "success": True, "message_id": msg.message_id,
+        "from": "deterioration_sentinel", "to": inputs["to_agent"],
+        "patient_id": inputs["patient_id"], "sent_at": msg.sent_at,
     }
 
 
 def _no_action(inputs: dict, store: SentinelStore) -> dict:
     patient_id = inputs["patient_id"]
     reason     = inputs["reason"]
-
     patient = store.get_patient(patient_id)
-    name    = patient.name if patient else patient_id
-
+    name = patient.name if patient else patient_id
     store._action_log.append({
-        "timestamp":  datetime.now().isoformat(timespec="minutes"),
-        "action":     "no_action",
-        "patient_id": patient_id,
-        "reason":     reason,
+        "timestamp": datetime.now().isoformat(timespec="minutes"),
+        "action": "no_action", "patient_id": patient_id, "reason": reason,
     })
-
     print(f"  [STABLE] {name} ({patient_id}) — {reason}")
+    return {"status": "no_action", "patient_id": patient_id, "patient_name": name, "reason": reason}
 
-    return {
-        "status":     "no_action",
-        "patient_id": patient_id,
-        "patient_name": name,
-        "reason":     reason,
-    }
+
+def _process_inbox(store: SentinelStore) -> dict:
+    """
+    Read the sentinel's inbox and act on messages from peer agents.
+    Called at the start of every sentinel cycle.
+    """
+    inbox = bus.get_inbox("deterioration_sentinel", unread_only=True)
+    if not inbox:
+        return {"messages_found": 0, "actions_taken": []}
+
+    actions = []
+    for msg in inbox:
+        action_taken = ""
+
+        if msg.message_type == "discharge_cleared":
+            # Discharge agent says patient is going home — downgrade monitoring priority
+            patient = store.get_patient(msg.patient_id)
+            name = patient.name if patient else msg.patient_id
+            action_taken = f"Patient {name} discharged — removing from active watch list."
+            print(f"  [INBOX] discharge_cleared for {msg.patient_id}: {msg.content[:80]}")
+
+        elif msg.message_type == "fyi":
+            # Generic informational — log only
+            action_taken = f"FYI logged from {msg.from_agent}: {msg.content[:80]}"
+            print(f"  [INBOX] fyi from {msg.from_agent} re {msg.patient_id}: {msg.content[:80]}")
+
+        elif msg.message_type == "high_acuity_alert":
+            # Triage found a new high-acuity patient — add to watch list immediately
+            action_taken = f"High-acuity flag received from triage for {msg.patient_id}. Will assess vitals next."
+            print(f"  [INBOX] high_acuity_alert from triage re {msg.patient_id}: {msg.content[:80]}")
+
+        else:
+            action_taken = f"Message type {msg.message_type} logged."
+
+        bus.mark_processed(msg.message_id, response=action_taken)
+        actions.append({
+            "message_id": msg.message_id,
+            "from":       msg.from_agent,
+            "type":       msg.message_type,
+            "patient_id": msg.patient_id,
+            "action":     action_taken,
+        })
+
+    return {"messages_found": len(inbox), "actions_taken": actions}

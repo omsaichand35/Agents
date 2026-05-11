@@ -104,14 +104,14 @@ def demo_ollama():
     print("\n[Demo] Cycle 1:")
     print("  Meena P. — Amoxicillin-Clavulanate prescribed 6h ago,")
     print("  never dispensed (pharmacy out of stock), never administered.")
-    print("  Agent should: detect gap → query pharmacy → find substitute")
-    print("  → get doctor approval → update prescription → notify all.\n")
+    print("  Agent should: detect gap -> query pharmacy -> find substitute")
+    print("  -> get doctor approval -> update prescription -> notify all.\n")
     run_care_cycle_ollama(client, store, cycle=1)
 
     # ── Cycle 2: administration overdue ───────────────────────────────────
     print("\n[Demo] Cycle 2:")
     print("  Arjun K. — Metoprolol dispensed but nurse has not confirmed")
-    print("  administration (1h overdue). Agent should: detect gap → notify nurse.\n")
+    print("  administration (1h overdue). Agent should: detect gap -> notify nurse.\n")
     run_care_cycle_ollama(client, store, cycle=2)
 
     # ── Audit summary ─────────────────────────────────────────────────────
@@ -133,7 +133,7 @@ def demo_ollama():
 
     print("\n── Notifications ──")
     for s in sms:
-        print(f"  → {s['recipient']} ({s['phone']}): {s['message'][:80]}")
+        print(f"  -> {s['recipient']} ({s['phone']}): {s['message'][:80]}")
 
     print("\n── Open gaps ──")
     if not gaps:

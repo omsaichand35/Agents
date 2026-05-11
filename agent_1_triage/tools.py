@@ -227,7 +227,7 @@ def _send_sms(patient_id: str, message: str, store: PatientStore) -> dict:
 
     # In production: call Twilio / AWS SNS here
     store.log_sms(patient_id, p.phone, message)
-    print(f"  [SMS → {p.phone}] {message}")
+    print(f"  [SMS -> {p.phone}] {message}")
     return {
         "success": True,
         "patient_id": patient_id,
