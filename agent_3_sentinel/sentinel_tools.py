@@ -12,8 +12,22 @@ Changes from original:
 from __future__ import annotations
 from typing import Any
 from datetime import datetime
-from sentinel_store import SentinelStore
+try:
+    from .sentinel_store import SentinelStore
+except ImportError:
+    from sentinel_store import SentinelStore
 from shared_bus import bus   # ← real shared bus
+from shared_state import OperationalEvent, ops
+from patient_registry import get_canonical_patient_id
+
+
+def _resolve_canonical_patient_id(local_patient_id: str) -> str | None:
+    """Best-effort canonical ID lookup across agent-local ID spaces."""
+    for agent_key in ("sentinel_id", "discharge_id", "care_id", "triage_id", "recovery_id"):
+        canonical_id = get_canonical_patient_id(agent_key, local_patient_id)
+        if canonical_id:
+            return canonical_id
+    return None
 
 
 TOOL_DEFINITIONS = [
@@ -198,6 +212,28 @@ def _create_alert(inputs: dict, store: SentinelStore) -> dict:
     if not patient:
         return {"error": f"Patient {patient_id} not found"}
     alert = store.create_alert(patient_id, severity, reasoning)
+    canonical_id = _resolve_canonical_patient_id(patient_id)
+
+    if canonical_id:
+        state = ops.get_or_create(canonical_id, patient.name)
+        ops.add_alert(canonical_id, alert.alert_id)
+        ops.transition(
+            canonical_id,
+            "DETERIORATION_REVIEW",
+            reason=f"Sentinel alert {alert.alert_id}: {severity}",
+            agent="deterioration_sentinel",
+        )
+        if severity in ("high", "critical"):
+            ops.set_discharge_hold(canonical_id, True, f"Active deterioration alert {alert.alert_id}")
+        OperationalEvent.emit(
+            event="sentinel.alert_created",
+            agent="deterioration_sentinel",
+            patient_id=patient_id,
+            priority=severity,
+            next_action="care_gap_check" if severity in ("high", "critical") else "continue_monitoring",
+            workflow_state=state.workflow_state,
+            detail={"alert_id": alert.alert_id, "canonical_patient_id": canonical_id},
+        )
 
     # Automatically notify Care Continuity to check medication gaps for deteriorating patients
     if severity in ("high", "critical"):
@@ -241,6 +277,15 @@ def _message_agent(inputs: dict) -> dict:
         content      = inputs["content"],
         priority     = inputs.get("priority", "medium"),
     )
+    OperationalEvent.emit(
+        event="sentinel.message_sent",
+        agent="deterioration_sentinel",
+        patient_id=inputs["patient_id"],
+        priority=inputs.get("priority", "medium"),
+        next_action=inputs["to_agent"],
+        workflow_state="coordination",
+        detail={"message_type": inputs["message_type"], "message_id": msg.message_id},
+    )
     return {
         "success": True, "message_id": msg.message_id,
         "from": "deterioration_sentinel", "to": inputs["to_agent"],
@@ -253,6 +298,24 @@ def _no_action(inputs: dict, store: SentinelStore) -> dict:
     reason     = inputs["reason"]
     patient = store.get_patient(patient_id)
     name = patient.name if patient else patient_id
+    canonical_id = _resolve_canonical_patient_id(patient_id)
+    if canonical_id:
+        state = ops.get_or_create(canonical_id, name)
+        ops.transition(
+            canonical_id,
+            "UNDER_MONITORING",
+            reason=f"Sentinel no_action: {reason}",
+            agent="deterioration_sentinel",
+        )
+        OperationalEvent.emit(
+            event="sentinel.no_action",
+            agent="deterioration_sentinel",
+            patient_id=patient_id,
+            priority="info",
+            next_action="continue_monitoring",
+            workflow_state=state.workflow_state,
+            detail={"canonical_patient_id": canonical_id, "reason": reason},
+        )
     store._action_log.append({
         "timestamp": datetime.now().isoformat(timespec="minutes"),
         "action": "no_action", "patient_id": patient_id, "reason": reason,
@@ -280,6 +343,24 @@ def _process_inbox(store: SentinelStore) -> dict:
             name = patient.name if patient else msg.patient_id
             action_taken = f"Patient {name} discharged — removing from active watch list."
             print(f"  [INBOX] discharge_cleared for {msg.patient_id}: {msg.content[:80]}")
+            canonical_id = _resolve_canonical_patient_id(msg.patient_id)
+            if canonical_id:
+                ops.set_discharge_hold(canonical_id, False, "discharge cleared")
+                ops.transition(
+                    canonical_id,
+                    "DISCHARGED",
+                    reason="Discharge cleared notification received",
+                    agent="deterioration_sentinel",
+                )
+                OperationalEvent.emit(
+                    event="sentinel.discharge_cleared_received",
+                    agent="deterioration_sentinel",
+                    patient_id=msg.patient_id,
+                    priority="info",
+                    next_action="stop_monitoring",
+                    workflow_state="DISCHARGED",
+                    detail={"canonical_patient_id": canonical_id},
+                )
 
         elif msg.message_type == "fyi":
             # Generic informational — log only
@@ -290,6 +371,23 @@ def _process_inbox(store: SentinelStore) -> dict:
             # Triage found a new high-acuity patient — add to watch list immediately
             action_taken = f"High-acuity flag received from triage for {msg.patient_id}. Will assess vitals next."
             print(f"  [INBOX] high_acuity_alert from triage re {msg.patient_id}: {msg.content[:80]}")
+            canonical_id = _resolve_canonical_patient_id(msg.patient_id)
+            if canonical_id:
+                ops.transition(
+                    canonical_id,
+                    "UNDER_MONITORING",
+                    reason="High-acuity alert from triage",
+                    agent="deterioration_sentinel",
+                )
+                OperationalEvent.emit(
+                    event="sentinel.high_acuity_received",
+                    agent="deterioration_sentinel",
+                    patient_id=msg.patient_id,
+                    priority=msg.priority,
+                    next_action="assess_vitals",
+                    workflow_state="UNDER_MONITORING",
+                    detail={"canonical_patient_id": canonical_id},
+                )
 
         else:
             action_taken = f"Message type {msg.message_type} logged."

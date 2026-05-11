@@ -1,26 +1,33 @@
 """
-tools.py  (triage — updated with real bus integration)
-=======================================================
-Changes:
-  • notify_doctor also publishes high_acuity_alert to sentinel + care
-  • New process_inbox() tool reads bed_available and medication_gap_found messages
+Recovery Guardian tools.
+
+These tools support the post-discharge recovery workflow, including silent
+compliance-gap detection, patient reminders, doctor escalation, and recovery
+closure actions.
 """
 
 from __future__ import annotations
-from typing import Any
-from patient_store import PatientStore
-from shared_bus import bus
+
+from datetime import datetime, timedelta
+from typing import Any, Dict, List
+
+from family_comms import FamilyCommsService
+from shared_state import OperationalEvent
+try:
+    from .recovery_store import RecoveryStore
+except ImportError:
+    from recovery_store import RecoveryStore
 
 
 TOOL_DEFINITIONS = [
     {
-        "name": "read_queue",
-        "description": "Returns current waiting queue. Also checks bus inbox for bed_available notices.",
+        "name": "read_all_patients",
+        "description": "Return all patients currently in post-discharge recovery.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "name": "read_patient_record",
-        "description": "Full clinical record for a single patient.",
+        "name": "read_patient_recovery",
+        "description": "Return the full recovery record for one discharged patient.",
         "input_schema": {
             "type": "object",
             "properties": {"patient_id": {"type": "string"}},
@@ -28,205 +35,266 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "write_action",
-        "description": "Reshuffle queue or discharge a patient.",
+        "name": "read_compliance_gaps",
+        "description": "Analyze missed critical medication doses and return severity details.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["reshuffle_queue", "discharge"]},
-                "ordered_patient_ids": {"type": "array", "items": {"type": "string"}},
-                "patient_id": {"type": "string"},
-                "reason": {"type": "string"},
-            },
-            "required": ["action", "reason"],
+            "properties": {"patient_id": {"type": "string"}},
+            "required": ["patient_id"],
         },
     },
     {
-        "name": "send_sms",
-        "description": "SMS a patient about their queue position change.",
+        "name": "send_medication_reminder",
+        "description": "Send a calm medication reminder to the patient and/or caregiver.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "patient_id": {"type": "string"},
-                "message":    {"type": "string"},
+                "time_of_day": {"type": "string"},
+            },
+            "required": ["patient_id", "time_of_day"],
+        },
+    },
+    {
+        "name": "notify_doctor",
+        "description": "Escalate a recovery concern to the treating doctor.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "patient_id": {"type": "string"},
+                "severity": {"type": "string", "enum": ["low", "moderate", "urgent", "emergency"]},
+                "reason": {"type": "string"},
+            },
+            "required": ["patient_id", "severity", "reason"],
+        },
+    },
+    {
+        "name": "send_emergency_sms",
+        "description": "Send a calm, specific emergency SMS to the patient or caregiver.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "patient_id": {"type": "string"},
+                "message": {"type": "string"},
             },
             "required": ["patient_id", "message"],
         },
     },
     {
-        "name": "notify_doctor",
-        "description": (
-            "Alert the on-duty doctor. For acuity >= 8 also publishes "
-            "high_acuity_alert to deterioration_sentinel and care_continuity."
-        ),
+        "name": "book_emergency_appointment",
+        "description": "Create a same-day or next-day follow-up appointment recommendation.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "priority":         {"type": "string", "enum": ["routine", "urgent", "critical"]},
-                "patient_id":       {"type": "string"},
-                "clinical_summary": {"type": "string"},
-                "acuity_score":     {"type": "integer",
-                                    "description": "1-10 acuity. If >= 8, peers are notified via bus."},
+                "patient_id": {"type": "string"},
+                "urgency": {"type": "string"},
             },
-            "required": ["priority", "patient_id", "clinical_summary"],
+            "required": ["patient_id", "urgency"],
         },
     },
     {
-        "name": "process_inbox",
-        "description": (
-            "Read messages addressed to triage_orchestrator from peer agents. "
-            "Call at cycle start. bed_available from discharge means a room just opened. "
-            "medication_gap_found from care means a patient had a critical drug issue."
-        ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "name": "mark_patient_recovered",
+        "description": "Mark a patient as recovered and close out the recovery workflow.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "patient_id": {"type": "string"},
+                "summary": {"type": "string"},
+            },
+            "required": ["patient_id", "summary"],
+        },
     },
 ]
 
 
-def execute_tool(name: str, inputs: dict[str, Any], store: PatientStore) -> dict:
+def execute_tool(name: str, inputs: Dict[str, Any], store: RecoveryStore) -> dict:
     try:
-        if name == "read_queue":
-            return _read_queue(store)
-        elif name == "read_patient_record":
-            return _read_patient_record(inputs["patient_id"], store)
-        elif name == "write_action":
-            return _write_action(inputs, store)
-        elif name == "send_sms":
-            return _send_sms(inputs["patient_id"], inputs["message"], store)
-        elif name == "notify_doctor":
+        if name == "read_all_patients":
+            return _read_all_patients(store)
+        if name == "read_patient_recovery":
+            return _read_patient_recovery(inputs["patient_id"], store)
+        if name == "read_compliance_gaps":
+            return _read_compliance_gaps(inputs["patient_id"], store)
+        if name == "send_medication_reminder":
+            return _send_medication_reminder(inputs["patient_id"], inputs["time_of_day"], store)
+        if name == "notify_doctor":
             return _notify_doctor(inputs, store)
-        elif name == "process_inbox":
-            return _process_inbox(store)
-        else:
-            return {"error": f"Unknown tool: {name}"}
-    except Exception as e:
-        return {"error": str(e)}
+        if name == "send_emergency_sms":
+            return _send_emergency_sms(inputs["patient_id"], inputs["message"], store)
+        if name == "book_emergency_appointment":
+            return _book_emergency_appointment(inputs["patient_id"], inputs["urgency"], store)
+        if name == "mark_patient_recovered":
+            return _mark_patient_recovered(inputs["patient_id"], inputs["summary"], store)
+        return {"error": f"Unknown tool: {name}"}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
-def _read_queue(store: PatientStore) -> dict:
-    queue = store.get_queue()
+def _patient_to_dict(patient) -> dict:
     return {
-        "queue_length": len(queue),
-        "patients": [
-            {"patient_id": p.id, "name": p.name, "age": p.age, "token": p.token,
-             "position": p.position, "chief_complaint": p.chief_complaint, "arrived_at": p.arrived_at}
-            for p in queue
+        "patient_id": patient.patient_id,
+        "name": patient.name,
+        "age": patient.age,
+        "phone": patient.phone,
+        "caregiver_phone": patient.caregiver_phone,
+        "language": patient.language,
+        "discharge_date": patient.discharge_date,
+        "diagnosis": patient.diagnosis,
+        "treating_doctor": patient.treating_doctor,
+        "doctor_phone": patient.doctor_phone,
+        "follow_up_date": patient.follow_up_date,
+        "ward": patient.ward,
+        "recovery_day": patient.recovery_day,
+        "status": patient.status,
+        "medications": [
+            {
+                "med_id": med.med_id,
+                "drug_name": med.drug_name,
+                "dose": med.dose,
+                "frequency": med.frequency,
+                "duration_days": med.duration_days,
+                "is_critical": med.is_critical,
+            }
+            for med in patient.medications
         ],
     }
 
 
-def _read_patient_record(patient_id: str, store: PatientStore) -> dict:
-    p = store.get_patient(patient_id)
-    if not p:
+def _read_all_patients(store: RecoveryStore) -> dict:
+    return {"patients": [_patient_to_dict(patient) for patient in store.get_all_patients()]}
+
+
+def _read_patient_recovery(patient_id: str, store: RecoveryStore) -> dict:
+    patient = store.get_patient(patient_id)
+    if not patient:
         return {"error": f"Patient {patient_id} not found"}
+
+    latest_checkin = store.get_latest_checkin(patient_id)
+    compliance = store.analyze_compliance_gaps(patient_id)
+
     return {
-        "patient_id": p.id, "name": p.name, "age": p.age, "token": p.token,
-        "position": p.position, "chief_complaint": p.chief_complaint,
-        "arrived_at": p.arrived_at, "phone": p.phone, "vitals": p.vitals, "notes": p.notes,
+        "patient": _patient_to_dict(patient),
+        "latest_checkin": None if not latest_checkin else {
+            "response_id": latest_checkin.response_id,
+            "day": latest_checkin.day,
+            "question": latest_checkin.question,
+            "response_code": latest_checkin.response_code,
+            "response_text": latest_checkin.response_text,
+            "recorded_at": latest_checkin.recorded_at,
+        },
+        "compliance": compliance,
+        "checkin_count": len(store.get_checkins(patient_id)),
     }
 
 
-def _write_action(inputs: dict, store: PatientStore) -> dict:
-    action = inputs["action"]
-    reason = inputs.get("reason", "")
-    if action == "reshuffle_queue":
-        ordered_ids = inputs.get("ordered_patient_ids", [])
-        if not ordered_ids:
-            return {"error": "ordered_patient_ids required"}
-        result = store.reshuffle(ordered_ids)
-        result["action"] = "reshuffle_queue"
-        result["reason"] = reason
-        return result
-    elif action == "discharge":
-        patient_id = inputs.get("patient_id")
-        if not patient_id:
-            return {"error": "patient_id required for discharge"}
-        ok = store.remove_patient(patient_id)
-        return {"action": "discharge", "patient_id": patient_id, "success": ok, "reason": reason}
-    return {"error": f"Unknown action: {action}"}
+def _read_compliance_gaps(patient_id: str, store: RecoveryStore) -> dict:
+    return store.analyze_compliance_gaps(patient_id)
 
 
-def _send_sms(patient_id: str, message: str, store: PatientStore) -> dict:
-    p = store.get_patient(patient_id)
-    if not p:
+def _send_medication_reminder(patient_id: str, time_of_day: str, store: RecoveryStore) -> dict:
+    patient = store.get_patient(patient_id)
+    if not patient:
         return {"error": f"Patient {patient_id} not found"}
-    store.log_sms(patient_id, p.phone, message)
-    print(f"  [SMS -> {p.phone}] {message}")
-    return {"success": True, "patient_id": patient_id, "phone": p.phone, "message_preview": message[:80]}
+
+    medications = [
+        {"drug": med.drug_name, "dose": med.dose}
+        for med in patient.medications
+    ]
+    result = FamilyCommsService.send_medication_reminder(patient_id, medications, time_of_day)
+    store.log_sms(patient_id, patient.phone, result["message"], sms_type="reminder")
+    return {"success": True, "patient_id": patient_id, "message": result["message"]}
 
 
-def _notify_doctor(inputs: dict, store: PatientStore) -> dict:
-    priority   = inputs["priority"]
+def _notify_doctor(inputs: dict, store: RecoveryStore) -> dict:
     patient_id = inputs["patient_id"]
-    summary    = inputs["clinical_summary"]
-    acuity     = inputs.get("acuity_score", 0)
+    severity = inputs["severity"]
+    reason = inputs["reason"]
+    patient = store.get_patient(patient_id)
+    if not patient:
+        return {"error": f"Patient {patient_id} not found"}
 
-    store.log_doctor_notification(summary, priority)
-    print(f"\n  [DOCTOR ALERT — {priority.upper()}]\n  {summary}\n")
-
-    # Notify peer agents for high-acuity cases
-    if acuity >= 8:
-        bus.publish(
-            from_agent   = "triage_orchestrator",
-            to_agent     = "deterioration_sentinel",
-            patient_id   = patient_id,
-            message_type = "high_acuity_alert",
-            content      = (
-                f"High-acuity patient (score {acuity}/10) moved to position 1. "
-                f"Clinical summary: {summary[:150]}"
-            ),
-            priority = "high" if acuity < 10 else "critical",
-        )
-        bus.publish(
-            from_agent   = "triage_orchestrator",
-            to_agent     = "care_continuity",
-            patient_id   = patient_id,
-            message_type = "high_acuity_alert",
-            content      = (
-                f"High-acuity patient (score {acuity}/10) entering ED. "
-                f"Verify all medications are ready. Summary: {summary[:120]}"
-            ),
-            priority = "high",
-        )
-
+    escalation = store.create_escalation(
+        patient_id=patient_id,
+        day=patient.recovery_day,
+        reason=reason,
+        severity=severity,
+        doctor_notified=True,
+        patient_sms_sent=False,
+    )
+    OperationalEvent.emit(
+        event="recovery.doctor_escalation",
+        agent="recovery_guardian",
+        patient_id=patient_id,
+        priority=severity,
+        next_action="doctor_followup",
+        workflow_state=patient.status,
+        detail={"reason": reason, "escalation_id": escalation.escalation_id},
+    )
     return {
-        "success": True, "priority": priority, "patient_id": patient_id,
-        "delivered_to": "on_duty_doctor",
-        "bus_notified": ["deterioration_sentinel", "care_continuity"] if acuity >= 8 else [],
+        "success": True,
+        "escalation_id": escalation.escalation_id,
+        "severity": severity,
+        "doctor": patient.treating_doctor,
     }
 
 
-def _process_inbox(store: PatientStore) -> dict:
-    inbox = bus.get_inbox("triage_orchestrator", unread_only=True)
-    if not inbox:
-        return {"messages_found": 0, "actions_taken": []}
+def _send_emergency_sms(patient_id: str, message: str, store: RecoveryStore) -> dict:
+    patient = store.get_patient(patient_id)
+    if not patient:
+        return {"error": f"Patient {patient_id} not found"}
 
-    actions = []
-    for msg in inbox:
-        action_taken = ""
+    FamilyCommsService.send_deterioration_notice(patient_id, severity="critical")
+    store.log_sms(patient_id, patient.phone, message, sms_type="emergency")
+    if patient.caregiver_phone:
+        store.log_sms(patient_id, patient.caregiver_phone, message, sms_type="emergency_caregiver")
+    OperationalEvent.emit(
+        event="recovery.emergency_sms_sent",
+        agent="recovery_guardian",
+        patient_id=patient_id,
+        priority="critical",
+        next_action="doctor_notification",
+        workflow_state=patient.status,
+        detail={"message": message},
+    )
+    return {"success": True, "patient_id": patient_id, "message": message}
 
-        if msg.message_type == "bed_available":
-            action_taken = (
-                f"Bed available notice received from discharge_negotiator "
-                f"for patient {msg.patient_id}. Ward capacity updated."
-            )
-            print(f"  [INBOX] bed_available: {msg.content[:80]}")
 
-        elif msg.message_type == "medication_gap_found":
-            action_taken = f"Medication gap resolved for {msg.patient_id} — noted for ED coordination."
-            print(f"  [INBOX] medication_gap_found for {msg.patient_id}: {msg.content[:80]}")
+def _book_emergency_appointment(patient_id: str, urgency: str, store: RecoveryStore) -> dict:
+    patient = store.get_patient(patient_id)
+    if not patient:
+        return {"error": f"Patient {patient_id} not found"}
 
-        elif msg.message_type == "patient_discharged":
-            action_taken = f"Patient {msg.patient_id} discharged — queue slot freed."
-            print(f"  [INBOX] patient_discharged: {msg.patient_id}")
+    today = datetime.now()
+    eta = today + timedelta(hours=4 if urgency == "urgent" else 24)
+    appointment = {
+        "patient_id": patient_id,
+        "urgency": urgency,
+        "recommended_for": eta.isoformat(timespec="minutes"),
+        "doctor": patient.treating_doctor,
+    }
+    OperationalEvent.emit(
+        event="recovery.emergency_appointment_booked",
+        agent="recovery_guardian",
+        patient_id=patient_id,
+        priority=urgency,
+        next_action="patient_followup",
+        workflow_state=patient.status,
+        detail={"appointment": appointment},
+    )
+    return {"success": True, "appointment": appointment}
 
-        else:
-            action_taken = f"Message {msg.message_type} logged."
 
-        bus.mark_processed(msg.message_id, response=action_taken)
-        actions.append({
-            "message_id": msg.message_id, "from": msg.from_agent,
-            "type": msg.message_type, "patient_id": msg.patient_id, "action": action_taken,
-        })
-
-    return {"messages_found": len(inbox), "actions_taken": actions}
+def _mark_patient_recovered(patient_id: str, summary: str, store: RecoveryStore) -> dict:
+    ok = store.update_status(patient_id, "recovered")
+    if not ok:
+        return {"error": f"Patient {patient_id} not found"}
+    OperationalEvent.emit(
+        event="recovery.closed",
+        agent="recovery_guardian",
+        patient_id=patient_id,
+        priority="info",
+        next_action="archive_case",
+        workflow_state="recovered",
+        detail={"summary": summary},
+    )
+    return {"success": True, "patient_id": patient_id, "summary": summary}

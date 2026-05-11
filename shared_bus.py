@@ -42,7 +42,7 @@ Supported message types (enforced):
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
+from typing import Any, Callable, List, Optional, Dict
 from datetime import datetime
 import uuid
 import threading
@@ -105,11 +105,38 @@ class MessageBus:
         with cls._lock:
             if cls._instance is None:
                 inst = super().__new__(cls)
-                inst._messages: List[BusMessage] = []
-                inst._subscribers: Dict[str, List] = {a: [] for a in VALID_AGENTS}
-                inst._audit_log: List[dict] = []
+                inst._messages = []
+                inst._subscribers = {a: [] for a in VALID_AGENTS}
+                inst._subscriptions = []
+                inst._audit_log = []
                 cls._instance = inst
         return cls._instance
+
+    # ── Subscribe ───────────────────────────────────────────────────────
+
+    def subscribe(
+        self,
+        agent: str,
+        message_types: List[str],
+        handler: Callable[[BusMessage], None],
+        workflow_state_filter: Optional[str] = None,
+    ) -> str:
+        """Register a synchronous callback for matching published messages."""
+        if agent not in VALID_AGENTS:
+            raise ValueError(f"Unknown agent: {agent}")
+        if not message_types:
+            raise ValueError("message_types must not be empty")
+
+        sub_id = f"SUB-{uuid.uuid4().hex[:6].upper()}"
+        with self._lock:
+            self._subscriptions.append({
+                "sub_id": sub_id,
+                "agent": agent,
+                "message_types": set(message_types),
+                "handler": handler,
+                "workflow_state_filter": workflow_state_filter,
+            })
+        return sub_id
 
     # ── Publish ───────────────────────────────────────────────────────────
 
@@ -141,6 +168,7 @@ class MessageBus:
             priority     = priority,
             sent_at      = datetime.now().isoformat(timespec="seconds"),
         )
+        subscriptions_to_fire: List[dict] = []
         with self._lock:
             self._messages.append(msg)
             self._audit_log.append({
@@ -153,10 +181,39 @@ class MessageBus:
                 "message_type": message_type,
                 "priority":     priority,
             })
+            for sub in self._subscriptions:
+                if sub["agent"] != to_agent:
+                    continue
+                if message_type not in sub["message_types"]:
+                    continue
+                state_filter = sub.get("workflow_state_filter")
+                if state_filter:
+                    try:
+                        from shared_state import ops
+
+                        state = ops.get(patient_id)
+                        if not state or state.workflow_state != state_filter:
+                            continue
+                    except Exception:
+                        continue
+                subscriptions_to_fire.append(sub)
         print(
             f"  [BUS > {from_agent} -> {to_agent}] "
             f"[{priority.upper()}] {message_type} | patient={patient_id} | {content[:80]}"
         )
+        for sub in subscriptions_to_fire:
+            try:
+                sub["handler"](msg)
+            except Exception as exc:
+                self._audit_log.append({
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "event": "subscription_error",
+                    "message_id": msg.message_id,
+                    "subscription_id": sub["sub_id"],
+                    "agent": sub["agent"],
+                    "error": str(exc),
+                })
+                print(f"  [BUS subscription error] {sub['agent']} -> {exc}")
         return msg
 
     # ── Consume ───────────────────────────────────────────────────────────

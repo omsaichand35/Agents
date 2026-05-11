@@ -9,10 +9,13 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 from datetime import datetime
 
+from patient_registry import get_canonical_patient_id
+
 
 @dataclass
 class Patient:
     id: str
+    canonical_id: str
     name: str
     age: int
     token: str                    # Original check-in token (e.g. A001)
@@ -38,6 +41,7 @@ class PatientStore:
         self._patients: List[Patient] = [
             Patient(
                 id="P001",
+                canonical_id="P-RAVI-001",
                 name="Ravi S.",
                 age=35,
                 token="A001",
@@ -49,6 +53,7 @@ class PatientStore:
             ),
             Patient(
                 id="P002",
+                canonical_id="P-MEENA-001",
                 name="Meena P.",
                 age=70,
                 token="A002",
@@ -60,6 +65,7 @@ class PatientStore:
             ),
             Patient(
                 id="P003",
+                canonical_id="P-ARJUN-001",
                 name="Arjun K.",
                 age=45,
                 token="A003",
@@ -71,6 +77,7 @@ class PatientStore:
             ),
             Patient(
                 id="P004",
+                canonical_id="P-PRIYA-001",
                 name="Priya T.",
                 age=28,
                 token="A004",
@@ -95,6 +102,18 @@ class PatientStore:
             if p.id == patient_id:
                 return p
         return None
+
+    def get_patient_by_canonical_id(self, canonical_id: str) -> Optional[Patient]:
+        for patient in self._patients:
+            if patient.canonical_id == canonical_id:
+                return patient
+        return None
+
+    def get_canonical_id(self, patient_id: str) -> Optional[str]:
+        patient = self.get_patient(patient_id)
+        if not patient:
+            return None
+        return patient.canonical_id or get_canonical_patient_id("triage_id", patient.id)
 
     def add_patient(self, patient: Patient) -> None:
         patient.position = len(self._patients) + 1

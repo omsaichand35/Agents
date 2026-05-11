@@ -11,8 +11,13 @@ Changes from original:
 from __future__ import annotations
 from typing import Any
 from datetime import datetime, timedelta
-from discharge_store import DischargeStore
+try:
+    from .discharge_store import DischargeStore
+except ImportError:
+    from discharge_store import DischargeStore
 from shared_bus import bus
+from shared_state import OperationalEvent, ops
+from patient_registry import get_canonical_patient_id
 import uuid
 
 TOOL_DEFINITIONS = [
@@ -180,6 +185,7 @@ def _get_discharge_candidates(store: DischargeStore) -> dict:
     }
     candidates = []
     for p in store.get_all_patients():
+        canonical_id = get_canonical_patient_id("discharge_id", p.patient_id)
         stable_hrs = 0
         if p.vitals_stable_since:
             dt = datetime.fromisoformat(p.vitals_stable_since)
@@ -189,10 +195,19 @@ def _get_discharge_candidates(store: DischargeStore) -> dict:
 
         if sentinel_hold:
             readiness = f"SENTINEL HOLD — deterioration alert active. Do not discharge."
+            if canonical_id:
+                ops.set_discharge_hold(canonical_id, True, readiness)
+                ops.transition(canonical_id, "DISCHARGE_BLOCKED", reason=readiness, agent="discharge_negotiator")
         elif p.clinically_ready:
             readiness = f"Clinically cleared. Vitals stable {stable_hrs}h. {len(open_blockers)} blocker(s)."
+            if canonical_id:
+                ops.set_discharge_hold(canonical_id, False, readiness)
+                ops.transition(canonical_id, "DISCHARGE_PENDING", reason=readiness, agent="discharge_negotiator")
         else:
             readiness = f"NOT clinically ready. Vitals stable {stable_hrs}h."
+            if canonical_id:
+                ops.set_discharge_hold(canonical_id, True, readiness)
+                ops.transition(canonical_id, "DISCHARGE_BLOCKED", reason=readiness, agent="discharge_negotiator")
 
         candidates.append({
             "patient_id": p.patient_id, "name": p.name, "age": p.age, "ward": p.ward,
@@ -202,6 +217,7 @@ def _get_discharge_candidates(store: DischargeStore) -> dict:
             "open_blocker_count": len(open_blockers),
             "readiness_reason": readiness,
             "discharge_eta": p.discharge_eta or "not set",
+            "canonical_patient_id": canonical_id or "",
         })
     return {"total_patients": len(candidates), "patients_on_hold": list(holds), "candidates": candidates}
 
@@ -295,6 +311,15 @@ def _message_agent(inputs: dict) -> dict:
         content      = content,
         priority     = priority,
     )
+    OperationalEvent.emit(
+        event="discharge.message_sent",
+        agent="discharge_negotiator",
+        patient_id=patient_id,
+        priority=priority,
+        next_action=to_agent,
+        workflow_state="discharge_coordination",
+        detail={"message_type": message_type, "message_id": msg.message_id},
+    )
     return {"success": True, "message_id": msg.message_id,
             "to_agent": to_agent, "sent_at": msg.sent_at}
 
@@ -324,10 +349,14 @@ def _resolve_blocker(inputs: dict, store: DischargeStore) -> dict:
         (b.patient_id for b in store._blockers if b.blocker_id == inputs["blocker_id"]), None
     )
     if patient_id:
+        canonical_id = get_canonical_patient_id("discharge_id", patient_id)
         remaining = store.get_open_blockers(patient_id)
         if len(remaining) == 0:
             p = store.get_patient(patient_id)
             if p and p.clinically_ready:
+                if canonical_id:
+                    ops.set_discharge_hold(canonical_id, False, "all blockers resolved")
+                    ops.transition(canonical_id, "DISCHARGED", reason="all blockers resolved", agent="discharge_negotiator")
                 bus.publish(
                     from_agent   = "discharge_negotiator",
                     to_agent     = "deterioration_sentinel",
@@ -343,6 +372,15 @@ def _resolve_blocker(inputs: dict, store: DischargeStore) -> dict:
                     message_type = "bed_available",
                     content      = f"Bed {p.bed_number} in {p.ward} will be free when {p.name} discharges.",
                     priority     = "low",
+                )
+                OperationalEvent.emit(
+                    event="discharge.completed",
+                    agent="discharge_negotiator",
+                    patient_id=patient_id,
+                    priority="info",
+                    next_action="notify_triage",
+                    workflow_state="DISCHARGED",
+                    detail={"canonical_patient_id": canonical_id or ""},
                 )
                 print(f"  [BUS AUTO] All blockers cleared for {patient_id} — sentinel + triage notified.")
 
@@ -364,10 +402,23 @@ def _no_action(inputs: dict, store: DischargeStore) -> dict:
     reason     = inputs["reason"]
     p = store.get_patient(patient_id)
     name = p.name if p else patient_id
+    canonical_id = get_canonical_patient_id("discharge_id", patient_id) if p else None
+    if canonical_id:
+        ops.set_discharge_hold(canonical_id, True, reason)
+        ops.transition(canonical_id, "DISCHARGE_BLOCKED", reason=reason, agent="discharge_negotiator")
     store._action_log.append({
         "timestamp": datetime.now().isoformat(timespec="minutes"),
         "action": "no_action", "patient_id": patient_id, "reason": reason,
     })
+    OperationalEvent.emit(
+        event="discharge.no_action",
+        agent="discharge_negotiator",
+        patient_id=patient_id,
+        priority="info",
+        next_action="review_again_later",
+        workflow_state="DISCHARGE_BLOCKED",
+        detail={"reason": reason, "canonical_patient_id": canonical_id or ""},
+    )
     print(f"  [NOT READY] {name} ({patient_id}) — {reason}")
     return {"status": "no_action", "patient_id": patient_id, "reason": reason}
 
@@ -393,6 +444,19 @@ def _process_inbox(store: DischargeStore) -> dict:
                 f"Discharge blocked this cycle. Reason: {msg.content[:100]}"
             )
             print(f"  [INBOX] hold_discharge from sentinel: {msg.patient_id} BLOCKED. {msg.content[:80]}")
+            canonical_id = get_canonical_patient_id("sentinel_id", msg.patient_id)
+            if canonical_id:
+                ops.set_discharge_hold(canonical_id, True, msg.content)
+                ops.transition(canonical_id, "DISCHARGE_BLOCKED", reason=msg.content, agent="discharge_negotiator")
+                OperationalEvent.emit(
+                    event="discharge.hold_received",
+                    agent="discharge_negotiator",
+                    patient_id=msg.patient_id,
+                    priority=msg.priority,
+                    next_action="suspend_discharge",
+                    workflow_state="DISCHARGE_BLOCKED",
+                    detail={"canonical_patient_id": canonical_id},
+                )
 
         elif msg.message_type == "fyi_deterioration":
             action_taken = f"FYI deterioration noted for {msg.patient_id}. Monitoring discharge readiness."

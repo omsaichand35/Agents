@@ -12,9 +12,24 @@ Changes from original:
 from __future__ import annotations
 from typing import Any
 from datetime import datetime, timedelta
-from care_store import CareStore, Medication
+try:
+    from .care_store import CareStore, Medication
+except ImportError:
+    from care_store import CareStore, Medication
 from shared_bus import bus   # ← real shared bus
+from shared_state import OperationalEvent, ops
+from patient_registry import get_canonical_patient_id
+from approval_layer import approvals
 import uuid
+
+
+def _resolve_canonical_patient_id(local_patient_id: str) -> str | None:
+    """Best-effort canonical ID lookup across agent-local ID spaces."""
+    for agent_key in ("care_id", "triage_id", "sentinel_id", "discharge_id", "recovery_id"):
+        canonical_id = get_canonical_patient_id(agent_key, local_patient_id)
+        if canonical_id:
+            return canonical_id
+    return None
 
 DRUG_EQUIVALENCE_DB = {
     "beta-lactam antibiotic": [
@@ -187,6 +202,24 @@ def _scan_care_gaps(store: CareStore) -> dict:
                     med_id=med.med_id,
                 )
                 gaps.append(gap)
+                canonical_id = _resolve_canonical_patient_id(med.patient_id)
+                if canonical_id:
+                    ops.update_medication(canonical_id, med.med_id, "gap_detected")
+                    ops.transition(
+                        canonical_id,
+                        "MEDICATION_PENDING",
+                        reason=f"Medication not dispensed: {med.drug_name}",
+                        agent="care_continuity",
+                    )
+                    OperationalEvent.emit(
+                        event="care.medication_gap_detected",
+                        agent="care_continuity",
+                        patient_id=med.patient_id,
+                        priority=severity,
+                        next_action="pharmacy_or_doctor_review",
+                        workflow_state="MEDICATION_PENDING",
+                        detail={"canonical_patient_id": canonical_id, "med_id": med.med_id},
+                    )
         if med.status == "dispensed" and med.next_due_at:
             hours_overdue = (now - datetime.fromisoformat(med.next_due_at)).total_seconds() / 3600
             nurse_rec = store.get_nurse_record(med.med_id)
@@ -203,6 +236,24 @@ def _scan_care_gaps(store: CareStore) -> dict:
                     med_id=med.med_id,
                 )
                 gaps.append(gap)
+                canonical_id = _resolve_canonical_patient_id(med.patient_id)
+                if canonical_id and severity == "critical":
+                    ops.update_medication(canonical_id, med.med_id, "administration_overdue")
+                    ops.transition(
+                        canonical_id,
+                        "MEDICATION_PENDING",
+                        reason=f"Administration overdue: {med.drug_name}",
+                        agent="care_continuity",
+                    )
+                    OperationalEvent.emit(
+                        event="care.administration_overdue",
+                        agent="care_continuity",
+                        patient_id=med.patient_id,
+                        priority="critical",
+                        next_action="nurse_followup",
+                        workflow_state="MEDICATION_PENDING",
+                        detail={"canonical_patient_id": canonical_id, "med_id": med.med_id},
+                    )
 
     # Also surface any urgent sentinel requests from the bus
     urgent_requests = bus.get_inbox("care_continuity", unread_only=True)
@@ -284,24 +335,47 @@ def _drug_substitution_search(inputs: dict, store: CareStore) -> dict:
 
 
 def _escalate_to_human(inputs: dict, store: CareStore) -> dict:
-    appr = store.create_approval_request(
+    approval_request = approvals.request(
         patient_id=inputs["patient_id"],
-        med_id=inputs["med_id"],
-        approval_type=inputs["approval_type"],
+        agent="care_continuity",
+        action_type=inputs["approval_type"],
         description=inputs["description"],
         suggested_action=inputs["suggested_action"],
-        doctor_id=inputs["doctor_id"],
+        auto_approve=True,
     )
     doctor = store.get_doctor(inputs["doctor_id"])
     doctor_name = doctor["name"] if doctor else inputs["doctor_id"]
 
-    store.approve(appr.approval_id)
-    appr.status = "approved"
+    canonical_id = _resolve_canonical_patient_id(inputs["patient_id"])
+    if canonical_id:
+        ops.transition(
+            canonical_id,
+            "DOCTOR_APPROVAL_PENDING",
+            reason=f"Approval requested: {inputs['approval_type']}",
+            agent="care_continuity",
+        )
+        OperationalEvent.emit(
+            event="care.approval_requested",
+            agent="care_continuity",
+            patient_id=inputs["patient_id"],
+            priority="high",
+            next_action="doctor_decision",
+            workflow_state="DOCTOR_APPROVAL_PENDING",
+            detail={"approval_id": approval_request.approval_id, "canonical_patient_id": canonical_id},
+        )
+
+    if canonical_id and approval_request.status == "approved":
+        ops.transition(
+            canonical_id,
+            "UNDER_MONITORING",
+            reason=f"Approval granted: {approval_request.approval_id}",
+            agent="care_continuity",
+        )
 
     print(f"\n  [DOCTOR APPROVAL -> {doctor_name}]")
-    print(f"  Type   : {appr.approval_type}")
-    print(f"  Action : {appr.suggested_action}")
-    print(f"  Status : approved (simulated)\n")
+    print(f"  Type   : {approval_request.action_type}")
+    print(f"  Action : {approval_request.suggested_action}")
+    print(f"  Status : {approval_request.status}\n")
 
     # Notify sentinel + triage that a critical medication gap was found
     bus.publish(
@@ -313,7 +387,7 @@ def _escalate_to_human(inputs: dict, store: CareStore) -> dict:
             f"Critical drug gap resolved via substitution for patient {inputs['patient_id']}. "
             f"Original: {inputs.get('med_id')}. "
             f"Action taken: {inputs['suggested_action']}. "
-            f"Approval ID: {appr.approval_id}."
+            f"Approval ID: {approval_request.approval_id}."
         ),
         priority = "high",
     )
@@ -330,13 +404,26 @@ def _escalate_to_human(inputs: dict, store: CareStore) -> dict:
     )
 
     store.log_action("escalate_to_human", {
-        "approval_id": appr.approval_id,
+        "approval_id": approval_request.approval_id,
         "doctor_id":   inputs["doctor_id"],
         "action":      inputs["suggested_action"],
     })
+    OperationalEvent.emit(
+        event="care.medication_gap_escalated",
+        agent="care_continuity",
+        patient_id=inputs["patient_id"],
+        priority="high",
+        next_action="peer_agent_sync",
+        workflow_state="UNDER_MONITORING",
+        detail={
+            "approval_id": approval_request.approval_id,
+            "status": approval_request.status,
+            "canonical_patient_id": canonical_id or "",
+        },
+    )
     return {
-        "approval_id": appr.approval_id, "status": appr.status,
-        "doctor_id": inputs["doctor_id"], "suggested_action": appr.suggested_action,
+        "approval_id": approval_request.approval_id, "status": approval_request.status,
+        "doctor_id": inputs["doctor_id"], "suggested_action": approval_request.suggested_action,
         "bus_notifications": ["deterioration_sentinel", "triage_orchestrator"],
     }
 
@@ -368,7 +455,10 @@ def _write_action(inputs: dict, store: CareStore) -> dict:
             status="pending",
         )
         store.add_medication(new_med)
-        import care_store as cs
+        try:
+            from . import care_store as cs
+        except ImportError:
+            import care_store as cs
         store.add_nurse_record(cs.NurseRecord(
             nurse_id="N001", patient_id=patient_id, med_id=new_med.med_id,
             scheduled_at=new_med.next_due_at, status="scheduled",
@@ -377,6 +467,25 @@ def _write_action(inputs: dict, store: CareStore) -> dict:
             "original_med_id": med_id, "new_med_id": new_med.med_id,
             "new_drug": new_drug_name, "reason": reason,
         })
+        canonical_id = _resolve_canonical_patient_id(patient_id)
+        if canonical_id:
+            ops.update_medication(canonical_id, med_id, "substituted")
+            ops.update_medication(canonical_id, new_med.med_id, "pending")
+            ops.transition(
+                canonical_id,
+                "UNDER_MONITORING",
+                reason=f"Prescription updated: {new_drug_name}",
+                agent="care_continuity",
+            )
+            OperationalEvent.emit(
+                event="care.prescription_updated",
+                agent="care_continuity",
+                patient_id=patient_id,
+                priority="medium",
+                next_action="nurse_administration",
+                workflow_state="UNDER_MONITORING",
+                detail={"canonical_patient_id": canonical_id, "new_med_id": new_med.med_id},
+            )
         return {"success": True, "action": "update_prescription",
                 "new_med_id": new_med.med_id, "new_drug": new_drug_name,
                 "next_administration": new_med.next_due_at}
@@ -391,6 +500,18 @@ def _write_action(inputs: dict, store: CareStore) -> dict:
         store.update_medication_status(med_id, "administered")
         store.update_nurse_record(med_id, "administered", datetime.now().isoformat(timespec="minutes"))
         store.log_action("mark_administered", {"med_id": med_id, "reason": reason})
+        canonical_id = _resolve_canonical_patient_id(patient_id)
+        if canonical_id:
+            ops.update_medication(canonical_id, med_id, "administered")
+            OperationalEvent.emit(
+                event="care.medication_administered",
+                agent="care_continuity",
+                patient_id=patient_id,
+                priority="info",
+                next_action="continue_monitoring",
+                workflow_state="UNDER_MONITORING",
+                detail={"canonical_patient_id": canonical_id, "med_id": med_id},
+            )
         return {"success": True, "action": "mark_administered", "med_id": med_id}
 
     return {"error": f"Unknown action: {action}"}
@@ -442,6 +563,24 @@ def _process_inbox(store: CareStore) -> dict:
                 f"Message: {msg.content[:100]}"
             )
             print(f"  [INBOX] check_medication_gaps from sentinel re {msg.patient_id}: prioritised.")
+            canonical_id = _resolve_canonical_patient_id(msg.patient_id)
+            if canonical_id:
+                ops.add_task(canonical_id, f"priority_med_gap_scan:{msg.patient_id}")
+                ops.transition(
+                    canonical_id,
+                    "MEDICATION_PENDING",
+                    reason="Sentinel requested medication gap verification",
+                    agent="care_continuity",
+                )
+                OperationalEvent.emit(
+                    event="care.sentinel_gap_request_received",
+                    agent="care_continuity",
+                    patient_id=msg.patient_id,
+                    priority=msg.priority,
+                    next_action="scan_care_gaps",
+                    workflow_state="MEDICATION_PENDING",
+                    detail={"canonical_patient_id": canonical_id},
+                )
 
         elif msg.message_type == "high_acuity_alert":
             action_taken = f"High-acuity alert from triage for {msg.patient_id}. Verifying medication schedule."

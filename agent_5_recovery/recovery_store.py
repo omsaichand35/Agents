@@ -269,6 +269,99 @@ class RecoveryStore:
             if c["patient_id"] == patient_id and c["status"] == "missed"
         ]
 
+    def analyze_compliance_gaps(self, patient_id: str) -> dict:
+        """Summarize missed medication doses with severity and streak analysis."""
+        patient = self.get_patient(patient_id)
+        if not patient:
+            return {"patient_id": patient_id, "error": "patient_not_found"}
+
+        missed = self.get_missed_critical_doses(patient_id)
+        if not missed:
+            return {
+                "patient_id": patient_id,
+                "patient_name": patient.name,
+                "gap_count": 0,
+                "gaps": [],
+                "action_required": False,
+                "summary": "No missed critical doses found.",
+            }
+
+        med_lookup = {med.med_id: med for med in patient.medications}
+        by_med: Dict[str, List[dict]] = {}
+        for record in missed:
+            by_med.setdefault(record["med_id"], []).append(record)
+
+        gaps = []
+        for med_id, records in by_med.items():
+            records_sorted = sorted(records, key=lambda item: item["date"])
+            unique_dates = sorted({item["date"] for item in records_sorted})
+            consecutive_streak = 1
+            longest_streak = 1
+
+            for index in range(1, len(unique_dates)):
+                prev_date = datetime.fromisoformat(unique_dates[index - 1]).date()
+                current_date = datetime.fromisoformat(unique_dates[index]).date()
+                if (current_date - prev_date).days == 1:
+                    consecutive_streak += 1
+                else:
+                    consecutive_streak = 1
+                longest_streak = max(longest_streak, consecutive_streak)
+
+            med = med_lookup.get(med_id)
+            drug_name = records_sorted[0]["drug"] if records_sorted else med.drug_name if med else med_id
+            is_critical = bool(med.is_critical) if med else False
+            drug_name_lower = drug_name.lower()
+            is_cardiac = any(keyword in drug_name_lower for keyword in ["aspirin", "atorvastatin", "metoprolol", "clopidogrel", "warfarin"])
+            is_anticoagulant = any(keyword in drug_name_lower for keyword in ["warfarin", "enoxaparin", "heparin", "apixaban", "rivaroxaban"])
+
+            if (is_cardiac or is_anticoagulant) and longest_streak >= 3:
+                severity = "emergency"
+            elif is_critical and longest_streak >= 2:
+                severity = "urgent"
+            elif is_critical:
+                severity = "moderate"
+            else:
+                severity = "low"
+
+            gaps.append({
+                "med_id": med_id,
+                "drug": drug_name,
+                "missed_count": len(records_sorted),
+                "missed_dates": unique_dates,
+                "longest_consecutive_streak": longest_streak,
+                "is_critical": is_critical,
+                "is_cardiac": is_cardiac,
+                "is_anticoagulant": is_anticoagulant,
+                "severity": severity,
+                "action": (
+                    "emergency_sms_and_doctor" if severity == "emergency"
+                    else "emergency_sms_and_doctor" if severity == "urgent"
+                    else "reminder_and_flag" if severity == "moderate"
+                    else "reminder"
+                ),
+            })
+
+        action_required = any(item["severity"] in {"urgent", "emergency"} for item in gaps)
+        highest_severity = "low"
+        if any(item["severity"] == "emergency" for item in gaps):
+            highest_severity = "emergency"
+        elif any(item["severity"] == "urgent" for item in gaps):
+            highest_severity = "urgent"
+        elif any(item["severity"] == "moderate" for item in gaps):
+            highest_severity = "moderate"
+
+        return {
+            "patient_id": patient_id,
+            "patient_name": patient.name,
+            "gap_count": len(gaps),
+            "gaps": gaps,
+            "action_required": action_required,
+            "highest_severity": highest_severity,
+            "summary": (
+                f"{len(gaps)} medication compliance gap(s) found; highest severity: {highest_severity}."
+            ),
+        }
+
     # ── Escalations ───────────────────────────────────────────────────────
 
     def create_escalation(
